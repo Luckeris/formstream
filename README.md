@@ -1,4 +1,4 @@
-# FormStream
+# FormStream ?
 
 > **Lightweight, zero-dependency Go microservice for handling contact form submissions and streaming instant notifications to Discord.**
 
@@ -7,7 +7,7 @@
 
 ---
 
-## About FormStream
+## ?? About FormStream
 
 **FormStream** is a fast, self-hosted microservice written in Go that receives contact form submissions from static websites (React, Astro, Next.js, HTML) and:
 
@@ -17,24 +17,24 @@
 
 ---
 
-## Quick Start
+## ? Quick Start
 
 ### 1. Run the Server
 
-```
+`bash
 go run main.go
-```
+``n
 
 ### 2. Test Form Submission
 
-```
+`bash
 curl -X POST http://localhost:8080/submit \
  -H Content-Type: application/json \
  -d '{name:Jan Nov�k,email:jan@example.com,message:Hello from FormStream!}'
-```
+``n
 
 ---
 
-## License
+## ?? License
 
 This project is licensed under the **MIT License** � see the [LICENSE](LICENSE) file for details.
