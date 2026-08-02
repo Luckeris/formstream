@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 type FormSubmission struct {
@@ -25,6 +26,21 @@ func submit(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Invalid request payload", http.StatusBadRequest)
 
+		return
+	}
+
+	if strings.TrimSpace(data.Name) == "" {
+		http.Error(w, "Name cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(data.Message) == "" {
+		http.Error(w, "Message cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	if !strings.Contains(data.Email, "@") {
+		http.Error(w, "Email has to be in a valid format example@example.example", http.StatusBadRequest)
 		return
 	}
 
