@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/mail"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +42,118 @@ type APIResponse struct {
 	Message string `json:"message"`
 	Error   string `json:"error,omitempty"`
 }
+
+// SubmissionsStore manages thread-safe local persistence and retrieval of form submissions in a JSON file.
+type SubmissionsStore struct {
+	mu       sync.RWMutex
+	filePath string
+}
+
+// NewSubmissionsStore creates a new SubmissionsStore targeting the specified file path.
+func NewSubmissionsStore(filePath string) *SubmissionsStore {
+	return &SubmissionsStore{
+		filePath: filePath,
+	}
+}
+
+// GetAll retrieves all stored form submissions from the JSON file.
+// If the file does not exist yet or is empty, it returns an empty slice.
+func (s *SubmissionsStore) GetAll() ([]FormSubmission, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	data, err := os.ReadFile(s.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []FormSubmission{}, nil
+		}
+		return nil, fmt.Errorf("failed to read submissions file %s: %w", s.filePath, err)
+	}
+
+	if len(bytes.TrimSpace(data)) == 0 {
+		return []FormSubmission{}, nil
+	}
+
+	var submissions []FormSubmission
+	if err := json.Unmarshal(data, &submissions); err != nil {
+		return nil, fmt.Errorf("failed to parse submissions from %s: %w", s.filePath, err)
+	}
+
+	if submissions == nil {
+		submissions = []FormSubmission{}
+	}
+
+	return submissions, nil
+}
+
+// Save atomically appends a new form submission to the JSON file in a thread-safe manner.
+func (s *SubmissionsStore) Save(sub FormSubmission) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var submissions []FormSubmission
+
+	// Read existing submissions if the file already exists
+	if data, err := os.ReadFile(s.filePath); err == nil {
+		if len(bytes.TrimSpace(data)) > 0 {
+			if err := json.Unmarshal(data, &submissions); err != nil {
+				return fmt.Errorf("failed to parse existing submissions from %s: %w", s.filePath, err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read submissions file %s: %w", s.filePath, err)
+	}
+
+	submissions = append(submissions, sub)
+
+	formattedJSON, err := json.MarshalIndent(submissions, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal submissions: %w", err)
+	}
+	formattedJSON = append(formattedJSON, '\n')
+
+	dir := filepath.Dir(s.filePath)
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	// Create temporary file in the same directory for atomic rename
+	tmpFile, err := os.CreateTemp(dir, "submissions-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(formattedJSON); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("failed to write submissions to temp file: %w", err)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, s.filePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("failed to atomically rename temp file to %s: %w", s.filePath, err)
+	}
+
+	return nil
+}
+
+// defaultStore is the default SubmissionsStore targeting submissions.json.
+var defaultStore = NewSubmissionsStore("submissions.json")
 
 // Helper function to send structured JSON error responses with appropriate status code and headers.
 func sendJSONError(w http.ResponseWriter, statusCode int, message string) {
@@ -174,6 +288,13 @@ func submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Persist the valid submission safely into submissions.json
+	if err := defaultStore.Save(data); err != nil {
+		log.Printf("Error saving submission to storage: %v", err)
+		sendJSONError(w, http.StatusInternalServerError, "Failed to persist submission.")
+		return
+	}
+
 	fmt.Printf("Received from form -> Name: %s, Email: %s, Message: %s\n", data.Name, data.Email, data.Message)
 
 	// If the webhookURL isnt empty, we send the data to the webhook, if it is, we dont
@@ -183,6 +304,40 @@ func submit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sendJSONSuccess(w, http.StatusOK, "Form was successfully received.")
+}
+
+// submissions handles requests to inspect stored form submissions during testing.
+func submissions(w http.ResponseWriter, r *http.Request) {
+	// Enable CORS for all incoming origins
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Handle CORS preflight OPTIONS request
+	if r.Method == http.MethodOptions {
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Reject non-GET requests
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		sendJSONError(w, http.StatusMethodNotAllowed, "Only GET method is allowed.")
+		return
+	}
+
+	subs, err := defaultStore.GetAll()
+	if err != nil {
+		log.Printf("Error retrieving submissions: %v", err)
+		sendJSONError(w, http.StatusInternalServerError, "Failed to retrieve submissions.")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(subs); err != nil {
+		log.Printf("Error encoding submissions response: %v", err)
+	}
 }
 
 // Default HOME Endpoint
@@ -201,11 +356,20 @@ func home(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "FormStream API Server")
 }
 
-func main() {
+// setupRoutes initializes and returns the HTTP serve mux with all endpoints registered.
+func setupRoutes() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/submit", submit)
+	mux.HandleFunc("/submissions", submissions)
+	mux.HandleFunc("/", home)
+	return mux
+}
 
-	http.HandleFunc("/submit", submit)
-	http.HandleFunc("/", home)
+func main() {
+	mux := setupRoutes()
 
 	fmt.Println("Server is running on http://localhost:8080")
-	http.ListenAndServe(":8080", nil)
+	if err := http.ListenAndServe(":8080", mux); err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
 }
