@@ -22,6 +22,7 @@ var discordHTTPClient = &http.Client{
 // converts into JsonBytes and sends it via HTTP POST to the Discord webhookURL using a dedicated
 // HTTP client with a bounded timeout and proper response body closure.
 func sendToDiscord(webhookURL string, data FormSubmission) error {
+	webhookURL = strings.TrimSpace(webhookURL)
 	if !strings.HasPrefix(webhookURL, "http://") && !strings.HasPrefix(webhookURL, "https://") {
 		return fmt.Errorf("invalid discord webhook URL: must start with http:// or https://")
 	}
@@ -53,18 +54,19 @@ func sendToDiscord(webhookURL string, data FormSubmission) error {
 	}
 	defer resp.Body.Close()
 
-	// Read error body snippet if status is non-success for descriptive error reporting
-	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-	// Drain remaining response body to ensure underlying TCP connection is reusable
-	_, _ = io.Copy(io.Discard, resp.Body)
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Read error body snippet if status is non-success for descriptive error reporting
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		_, _ = io.Copy(io.Discard, resp.Body)
 		bodySnippet := strings.TrimSpace(string(bodyBytes))
 		if bodySnippet != "" {
 			return fmt.Errorf("discord returned non-success status code %d: %s", resp.StatusCode, bodySnippet)
 		}
 		return fmt.Errorf("discord returned non-success status code: %d", resp.StatusCode)
 	}
+
+	// Drain remaining response body on success to ensure underlying TCP connection is reusable
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	return nil
 }

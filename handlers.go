@@ -83,6 +83,11 @@ func submit(w http.ResponseWriter, r *http.Request) {
 	// Reject extraneous trailing tokens or payload garbage after the JSON object
 	var extra json.RawMessage
 	if err := dec.Decode(&extra); err != io.EOF {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) || (err != nil && strings.Contains(err.Error(), "request body too large")) {
+			sendJSONError(w, http.StatusRequestEntityTooLarge, "Request body exceeds 1MB limit")
+			return
+		}
 		sendJSONError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
@@ -170,6 +175,11 @@ func home(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, OPTIONS")
+		sendJSONError(w, http.StatusMethodNotAllowed, "Only GET method is allowed.")
 		return
 	}
 	fmt.Fprintln(w, "FormStream API Server")

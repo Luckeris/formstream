@@ -15,6 +15,7 @@ func setupRoutes() *http.ServeMux {
 	return mux
 }
 
+// main starts the HTTP server listening on port 8080.
 func main() {
 	mux := setupRoutes()
 

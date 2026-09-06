@@ -120,6 +120,8 @@ func (s *SubmissionsStore) Save(sub FormSubmission) error {
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 
+	_ = os.Chmod(tmpPath, 0644)
+
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
