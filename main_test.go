@@ -594,3 +594,315 @@ func TestHomeEndpoint(t *testing.T) {
 		t.Fatalf("expected status 204 No Content for OPTIONS /, got %d", recOptions.Code)
 	}
 }
+
+// TestSubmissionsStoreCorruptedFileRecovery verifies that when submissions.json contains
+// corrupted or invalid JSON prior to write, Save() safely backs it up to a .corrupted-* file,
+// preserves the data, and successfully persists the new submission so future requests succeed.
+func TestSubmissionsStoreCorruptedFileRecovery(t *testing.T) {
+	tempDir := t.TempDir()
+	origStore := defaultStore
+	testFile := filepath.Join(tempDir, "submissions.json")
+	store := NewSubmissionsStore(testFile)
+	defaultStore = store
+	defer func() {
+		defaultStore = origStore
+	}()
+
+	// 1. Write corrupted JSON to the file
+	corruptedData := []byte(`[{"name": "broken", "email":`)
+	if err := os.WriteFile(testFile, corruptedData, 0600); err != nil {
+		t.Fatalf("failed to write corrupted test file: %v", err)
+	}
+
+	// 2. GetAll() should return an error because JSON is malformed
+	_, err := store.GetAll()
+	if err == nil {
+		t.Fatalf("expected GetAll to return error for corrupted JSON, got nil")
+	}
+
+	// 3. GET /submissions endpoint should return 500
+	mux := setupRoutes()
+	req := httptest.NewRequest(http.MethodGet, "/submissions", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500 for corrupted submissions file, got %d", rec.Code)
+	}
+
+	// 4. Save() should detect corruption, back up the file, and persist the new submission
+	validSub := FormSubmission{
+		Name:    "Recovery Tester",
+		Email:   "recovery@example.com",
+		Message: "Testing recovery from corrupted file",
+	}
+	if err := store.Save(validSub); err != nil {
+		t.Fatalf("expected Save to succeed and recover from corrupted file, got: %v", err)
+	}
+
+	// 5. GetAll() should now succeed and return the new submission
+	subs, err := store.GetAll()
+	if err != nil {
+		t.Fatalf("expected GetAll to succeed after recovery: %v", err)
+	}
+	if len(subs) != 1 || subs[0].Name != validSub.Name {
+		t.Fatalf("expected 1 recovered submission, got %+v", subs)
+	}
+
+	// 6. Verify the backup file was created and contains the original corrupted data
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("failed to read temp dir: %v", err)
+	}
+	var backupFound bool
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "submissions.json.corrupted-") {
+			backupFound = true
+			data, err := os.ReadFile(filepath.Join(tempDir, entry.Name()))
+			if err != nil {
+				t.Fatalf("failed to read backup file: %v", err)
+			}
+			if string(data) != string(corruptedData) {
+				t.Errorf("backup file content mismatch: expected %q, got %q", corruptedData, data)
+			}
+			break
+		}
+	}
+	if !backupFound {
+		t.Fatalf("expected corrupted file backup to exist in %s", tempDir)
+	}
+}
+
+// TestSubmitWithDiscordErrorsAndNetworkFailures verifies that /submit still responds with 200 OK
+// and safely persists the submission even when Discord returns 5xx server errors or is unreachable.
+func TestSubmitWithDiscordErrorsAndNetworkFailures(t *testing.T) {
+	cleanup := setupTestStore(t)
+	defer cleanup()
+
+	mux := setupRoutes()
+
+	// Scenario 1: Discord returns 500 Internal Server Error
+	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "Discord server error"}`, http.StatusInternalServerError)
+	}))
+	defer errorServer.Close()
+
+	origURL := os.Getenv("DISCORD_WEBHOOK_URL")
+	_ = os.Setenv("DISCORD_WEBHOOK_URL", errorServer.URL)
+	defer func() {
+		if origURL != "" {
+			_ = os.Setenv("DISCORD_WEBHOOK_URL", origURL)
+		} else {
+			_ = os.Unsetenv("DISCORD_WEBHOOK_URL")
+		}
+	}()
+
+	payload1 := `{"name": "Resilient 1", "email": "resilient1@example.com", "message": "Test 500 Discord"}`
+	req1 := httptest.NewRequest(http.MethodPost, "/submit", strings.NewReader(payload1))
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	mux.ServeHTTP(rec1, req1)
+
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK even when Discord returns 500, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Scenario 2: Discord endpoint is an unreachable port (network failure)
+	_ = os.Setenv("DISCORD_WEBHOOK_URL", "http://127.0.0.1:59999/unreachable")
+	payload2 := `{"name": "Resilient 2", "email": "resilient2@example.com", "message": "Test unreachable Discord"}`
+	req2 := httptest.NewRequest(http.MethodPost, "/submit", strings.NewReader(payload2))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK even when Discord is unreachable, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	// Verify both submissions were safely persisted in the store
+	subs, err := defaultStore.GetAll()
+	if err != nil {
+		t.Fatalf("failed to retrieve stored submissions: %v", err)
+	}
+	if len(subs) != 2 {
+		t.Fatalf("expected 2 persisted submissions, got %d", len(subs))
+	}
+}
+
+// TestDiscordWebhookContentTruncation verifies that messages exceeding Discord's 2000-rune limit
+// are safely truncated to fit within Discord API constraints so the notification does not fail.
+func TestDiscordWebhookContentTruncation(t *testing.T) {
+	var receivedContent string
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var msg DiscordMessage
+		_ = json.NewDecoder(r.Body).Decode(&msg)
+		receivedContent = msg.Content
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer mockServer.Close()
+
+	longMessage := strings.Repeat("X", 3000)
+	sub := FormSubmission{
+		Name:    "Long Tester",
+		Email:   "long@example.com",
+		Message: longMessage,
+	}
+
+	if err := sendToDiscord(mockServer.URL, sub); err != nil {
+		t.Fatalf("expected sendToDiscord to succeed with long content, got: %v", err)
+	}
+
+	if len([]rune(receivedContent)) > maxDiscordContentLength {
+		t.Errorf("expected received content length <= %d, got %d", maxDiscordContentLength, len([]rune(receivedContent)))
+	}
+	if !strings.HasSuffix(receivedContent, "... [truncated]") {
+		t.Errorf("expected content to end with truncation notice, got %q", receivedContent[len(receivedContent)-30:])
+	}
+}
+
+// TestDiscordWebhookDetailedErrors verifies that sendToDiscord validates URL schemes
+// and extracts the response body snippet on 5xx or error responses.
+func TestDiscordWebhookDetailedErrors(t *testing.T) {
+	// Invalid scheme
+	sub := FormSubmission{
+		Name:    "Scheme Tester",
+		Email:   "scheme@example.com",
+		Message: "Testing invalid scheme",
+	}
+	err := sendToDiscord("ftp://discord.com/webhook", sub)
+	if err == nil || !strings.Contains(err.Error(), "must start with http:// or https://") {
+		t.Fatalf("expected invalid scheme error, got: %v", err)
+	}
+
+	// 500 error with descriptive snippet
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error": "Gateway Timeout from upstream"}`))
+	}))
+	defer server.Close()
+
+	err = sendToDiscord(server.URL, sub)
+	if err == nil {
+		t.Fatalf("expected error for 502 Bad Gateway, got nil")
+	}
+	if !strings.Contains(err.Error(), "502") || !strings.Contains(err.Error(), "Gateway Timeout") {
+		t.Errorf("expected error to include status 502 and body snippet, got: %v", err)
+	}
+}
+
+// TestSubmitNonASCIIAndInternational verifies that non-ASCII Unicode characters (diacritics, emoji)
+// are properly received, persisted, and retrieved without corruption.
+func TestSubmitNonASCIIAndInternational(t *testing.T) {
+	cleanup := setupTestStore(t)
+	defer cleanup()
+
+	origURL := os.Getenv("DISCORD_WEBHOOK_URL")
+	_ = os.Unsetenv("DISCORD_WEBHOOK_URL")
+	defer func() {
+		if origURL != "" {
+			_ = os.Setenv("DISCORD_WEBHOOK_URL", origURL)
+		}
+	}()
+
+	mux := setupRoutes()
+
+	payload := `{"name": "Tomáš Dvořák", "email": "tomas.dvorak@example.com", "message": "Příliš žluťoučký kůň úpěl ďábelské ódy. 🚀 ✨"}`
+	req := httptest.NewRequest(http.MethodPost, "/submit", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	subs, err := defaultStore.GetAll()
+	if err != nil {
+		t.Fatalf("failed to get stored submissions: %v", err)
+	}
+	if len(subs) != 1 {
+		t.Fatalf("expected 1 stored submission, got %d", len(subs))
+	}
+	if subs[0].Name != "Tomáš Dvořák" {
+		t.Errorf("expected name 'Tomáš Dvořák', got %q", subs[0].Name)
+	}
+	if subs[0].Message != "Příliš žluťoučký kůň úpěl ďábelské ódy. 🚀 ✨" {
+		t.Errorf("expected Unicode message to match, got %q", subs[0].Message)
+	}
+
+	// Verify GET /submissions endpoint returns exact Unicode string
+	reqGet := httptest.NewRequest(http.MethodGet, "/submissions", nil)
+	recGet := httptest.NewRecorder()
+	mux.ServeHTTP(recGet, reqGet)
+
+	if !strings.Contains(recGet.Body.String(), "Tomáš Dvořák") {
+		t.Errorf("expected GET /submissions response to contain 'Tomáš Dvořák', got %s", recGet.Body.String())
+	}
+}
+
+// TestEmailValidationExtended tests valid and invalid email forms including punycode, internationalized, and tag addresses.
+func TestEmailValidationExtended(t *testing.T) {
+	validEmails := []string{
+		"user@example.com",
+		"user.name+tag@sub.domain.co.uk",
+		"user@xn--mnchen-3ya.de",
+		"user@münchen.de", // RFC 6532 internationalized email address
+		"test_user@domain.org",
+	}
+	for _, email := range validEmails {
+		if !isValidEmail(email) {
+			t.Errorf("expected email %q to be valid, got false", email)
+		}
+	}
+
+	invalidEmails := []string{
+		"user@",
+		"@domain.com",
+		"user@domain",
+		"user@.domain.com",
+		"user@domain.com.",
+		"user@domain..com",
+		"user name@domain.com",
+	}
+	for _, email := range invalidEmails {
+		if isValidEmail(email) {
+			t.Errorf("expected email %q to be invalid, got true", email)
+		}
+	}
+}
+
+// TestSubmitTrailingDataRejected verifies that payloads containing extraneous data
+// after the main JSON object are rejected with HTTP 400 Bad Request.
+func TestSubmitTrailingDataRejected(t *testing.T) {
+	cleanup := setupTestStore(t)
+	defer cleanup()
+
+	mux := setupRoutes()
+
+	payload := `{"name": "Jan Novák", "email": "jan@example.com", "message": "hello"} extra_trailing_garbage`
+	req := httptest.NewRequest(http.MethodPost, "/submit", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 Bad Request for trailing garbage, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSubmitContentLengthHeaderTooLarge verifies fast rejection when Content-Length header > 1MB.
+func TestSubmitContentLengthHeaderTooLarge(t *testing.T) {
+	cleanup := setupTestStore(t)
+	defer cleanup()
+
+	mux := setupRoutes()
+
+	req := httptest.NewRequest(http.MethodPost, "/submit", strings.NewReader(`{"name": "A"}`))
+	req.ContentLength = maxRequestBodySize + 1
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected status 413 for oversized ContentLength header, got %d", rec.Code)
+	}
+}
+
