@@ -1,2 +1,4 @@
 .star/
 .env
+submissions.json
+*.tmp
