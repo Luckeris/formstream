@@ -29,14 +29,14 @@ FormStream uses the `DISCORD_WEBHOOK_URL` environment variable for Discord notif
 
 ```powershell
 $env:DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
-go run main.go
+go run .
 ```
 
 ### Linux / macOS
 
 ```bash
 export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
-go run main.go
+go run .
 ```
 
 ---
