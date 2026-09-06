@@ -43,18 +43,42 @@ go run main.go
 
 ## Testing
 
-### PowerShell
+### Submit Form
+
+#### PowerShell
 
 ```powershell
 Invoke-RestMethod -Uri "http://localhost:8080/submit" -Method Post -ContentType "application/json" -Body '{"name":"Jan Novák","email":"jan@example.com","message":"Hello from FormStream!"}'
 ```
 
-### cURL
+#### cURL
 
 ```bash
 curl -X POST http://localhost:8080/submit \
   -H "Content-Type: application/json" \
   -d '{"name":"Jan Novák","email":"jan@example.com","message":"Hello from FormStream!"}'
+```
+
+### Inspect Submissions
+
+#### PowerShell
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8080/submissions" -Method Get
+```
+
+#### cURL
+
+```bash
+curl http://localhost:8080/submissions
+```
+
+### Automated Tests
+
+Run the test suite and race detector:
+
+```bash
+go test -v -race ./...
 ```
 
 ---
