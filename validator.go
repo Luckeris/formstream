@@ -16,43 +16,60 @@ func isValidEmail(email string) bool {
 	if err != nil || addr.Address != email {
 		return false
 	}
-	parts := strings.Split(addr.Address, "@")
-	if len(parts) != 2 {
+
+	lastAt := strings.LastIndex(addr.Address, "@")
+	if lastAt <= 0 || lastAt >= len(addr.Address)-1 {
 		return false
 	}
 
-	localPart := parts[0]
+	localPart := addr.Address[:lastAt]
+	domain := addr.Address[lastAt+1:]
+
 	if len(localPart) == 0 || len(localPart) > 64 {
 		return false
 	}
 
-	domain := parts[1]
+	// Unquoted local parts must not have leading/trailing dots or consecutive dots
+	if !strings.HasPrefix(localPart, "\"") || !strings.HasSuffix(localPart, "\"") {
+		if strings.HasPrefix(localPart, ".") || strings.HasSuffix(localPart, ".") || strings.Contains(localPart, "..") {
+			return false
+		}
+	}
+
 	domainParts := strings.Split(domain, ".")
 	if len(domainParts) < 2 {
 		return false
 	}
 
-	// Validate each domain label according to DNS specifications (RFC 1035 / RFC 1123)
+	// Validate each domain label according to DNS specifications (RFC 1035 / RFC 1123 / RFC 5890)
 	for _, part := range domainParts {
 		if len(part) == 0 || len(part) > 63 || strings.HasPrefix(part, "-") || strings.HasSuffix(part, "-") {
 			return false
 		}
-	}
-
-	// Top-level domain must be at least 2 characters and cannot be all digits
-	tld := domainParts[len(domainParts)-1]
-	if len([]rune(tld)) < 2 {
-		return false
-	}
-	allDigits := true
-	for _, r := range tld {
-		if r < '0' || r > '9' {
-			allDigits = false
-			break
+		for _, r := range part {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r > 127) {
+				return false
+			}
 		}
 	}
-	if allDigits {
+
+	// Top-level domain must be at least 2 characters, cannot be all digits,
+	// and if not punycode (xn--...), must consist purely of letters or international characters
+	tld := domainParts[len(domainParts)-1]
+	tldRunes := []rune(tld)
+	if len(tldRunes) < 2 {
 		return false
+	}
+	if strings.HasPrefix(tld, "xn--") {
+		if len(tld) < 5 {
+			return false
+		}
+	} else {
+		for _, r := range tldRunes {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r > 127) {
+				return false
+			}
+		}
 	}
 
 	return true
