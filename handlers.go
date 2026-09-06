@@ -137,15 +137,15 @@ func submissions(w http.ResponseWriter, r *http.Request) {
 
 	// Handle CORS preflight OPTIONS request
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
-	// Reject non-GET requests
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET, OPTIONS")
+	// Reject non-GET / non-HEAD requests
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
 		sendJSONError(w, http.StatusMethodNotAllowed, "Only GET method is allowed.")
 		return
 	}
@@ -159,8 +159,10 @@ func submissions(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(subs); err != nil {
-		log.Printf("Error encoding submissions response: %v", err)
+	if r.Method != http.MethodHead {
+		if err := json.NewEncoder(w).Encode(subs); err != nil {
+			log.Printf("Error encoding submissions response: %v", err)
+		}
 	}
 }
 
@@ -172,15 +174,17 @@ func home(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodOptions {
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, OPTIONS")
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
 		sendJSONError(w, http.StatusMethodNotAllowed, "Only GET method is allowed.")
 		return
 	}
-	fmt.Fprintln(w, "FormStream API Server")
+	if r.Method != http.MethodHead {
+		fmt.Fprintln(w, "FormStream API Server")
+	}
 }

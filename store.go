@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,7 +19,12 @@ type SubmissionsStore struct {
 }
 
 // NewSubmissionsStore creates a new SubmissionsStore targeting the specified file path.
+// If filePath is empty, it defaults to "submissions.json".
 func NewSubmissionsStore(filePath string) *SubmissionsStore {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		filePath = "submissions.json"
+	}
 	return &SubmissionsStore{
 		filePath: filePath,
 	}
@@ -33,12 +39,17 @@ func (s *SubmissionsStore) GetAll() ([]FormSubmission, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	data, err := os.ReadFile(s.filePath)
+	targetPath := strings.TrimSpace(s.filePath)
+	if targetPath == "" {
+		targetPath = "submissions.json"
+	}
+
+	data, err := os.ReadFile(targetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []FormSubmission{}, nil
 		}
-		return nil, fmt.Errorf("failed to read submissions file %s: %w", s.filePath, err)
+		return nil, fmt.Errorf("failed to read submissions file %s: %w", targetPath, err)
 	}
 
 	if len(bytes.TrimSpace(data)) == 0 {
@@ -47,7 +58,7 @@ func (s *SubmissionsStore) GetAll() ([]FormSubmission, error) {
 
 	var submissions []FormSubmission
 	if err := json.Unmarshal(data, &submissions); err != nil {
-		return nil, fmt.Errorf("failed to parse submissions from %s: %w", s.filePath, err)
+		return nil, fmt.Errorf("failed to parse submissions from %s: %w", targetPath, err)
 	}
 
 	if submissions == nil {
@@ -63,23 +74,28 @@ func (s *SubmissionsStore) Save(sub FormSubmission) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	targetPath := strings.TrimSpace(s.filePath)
+	if targetPath == "" {
+		targetPath = "submissions.json"
+	}
+
 	var submissions []FormSubmission
 
 	// Read existing submissions if the file already exists
-	if data, err := os.ReadFile(s.filePath); err == nil {
+	if data, err := os.ReadFile(targetPath); err == nil {
 		if len(bytes.TrimSpace(data)) > 0 {
 			if err := json.Unmarshal(data, &submissions); err != nil {
 				// Existing file is corrupted. Back it up to preserve data and allow service to recover gracefully.
-				backupPath := fmt.Sprintf("%s.corrupted-%d", s.filePath, time.Now().UnixNano())
-				if renameErr := os.Rename(s.filePath, backupPath); renameErr == nil {
-					log.Printf("Warning: existing submissions file %s was corrupted (%v); backed up to %s", s.filePath, err, backupPath)
+				backupPath := fmt.Sprintf("%s.corrupted-%d", targetPath, time.Now().UnixNano())
+				if renameErr := os.Rename(targetPath, backupPath); renameErr == nil {
+					log.Printf("Warning: existing submissions file %s was corrupted (%v); backed up to %s", targetPath, err, backupPath)
 				} else {
-					return fmt.Errorf("failed to parse existing submissions from %s: %w", s.filePath, err)
+					return fmt.Errorf("failed to parse existing submissions from %s: %w", targetPath, err)
 				}
 			}
 		}
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read submissions file %s: %w", s.filePath, err)
+		return fmt.Errorf("failed to read submissions file %s: %w", targetPath, err)
 	}
 
 	submissions = append(submissions, sub)
@@ -90,7 +106,7 @@ func (s *SubmissionsStore) Save(sub FormSubmission) error {
 	}
 	formattedJSON = append(formattedJSON, '\n')
 
-	dir := filepath.Dir(s.filePath)
+	dir := filepath.Dir(targetPath)
 	if dir == "" {
 		dir = "."
 	}
@@ -126,8 +142,8 @@ func (s *SubmissionsStore) Save(sub FormSubmission) error {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, s.filePath); err != nil {
-		return fmt.Errorf("failed to atomically rename temp file to %s: %w", s.filePath, err)
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		return fmt.Errorf("failed to atomically rename temp file to %s: %w", targetPath, err)
 	}
 	tmpPath = "" // Success: temporary file successfully renamed
 
