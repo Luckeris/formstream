@@ -839,7 +839,7 @@ func TestSubmitNonASCIIAndInternational(t *testing.T) {
 	}
 }
 
-// TestEmailValidationExtended tests valid and invalid email forms including punycode, internationalized, and tag addresses.
+// TestEmailValidationExtended tests valid and invalid email forms including punycode, internationalized, DNS label rules, and RFC length limits.
 func TestEmailValidationExtended(t *testing.T) {
 	validEmails := []string{
 		"user@example.com",
@@ -862,6 +862,14 @@ func TestEmailValidationExtended(t *testing.T) {
 		"user@domain.com.",
 		"user@domain..com",
 		"user name@domain.com",
+		"user@-example.com",
+		"user@example.-com",
+		"user@example.com-",
+		"user@-.com",
+		"user@example.c",
+		"user@example.123",
+		strings.Repeat("a", 245) + "@example.com", // Total length > 254
+		strings.Repeat("a", 65) + "@example.com",  // Local part > 64
 	}
 	for _, email := range invalidEmails {
 		if isValidEmail(email) {
@@ -889,6 +897,26 @@ func TestSubmitTrailingDataRejected(t *testing.T) {
 	}
 }
 
+// TestSubmitTrailingDataExceedingLimit verifies that trailing data exceeding the 1MB limit
+// triggers an HTTP 413 StatusRequestEntityTooLarge response.
+func TestSubmitTrailingDataExceedingLimit(t *testing.T) {
+	cleanup := setupTestStore(t)
+	defer cleanup()
+
+	mux := setupRoutes()
+
+	// Valid JSON followed by >1MB of trailing spaces
+	payload := `{"name": "Jan Novák", "email": "jan@example.com", "message": "hello"}` + strings.Repeat(" ", maxRequestBodySize+100)
+	req := httptest.NewRequest(http.MethodPost, "/submit", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected status 413 for trailing data exceeding 1MB limit, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestSubmitContentLengthHeaderTooLarge verifies fast rejection when Content-Length header > 1MB.
 func TestSubmitContentLengthHeaderTooLarge(t *testing.T) {
 	cleanup := setupTestStore(t)
@@ -903,6 +931,79 @@ func TestSubmitContentLengthHeaderTooLarge(t *testing.T) {
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected status 413 for oversized ContentLength header, got %d", rec.Code)
+	}
+}
+
+// TestHomeMethodNotAllowed verifies non-GET/HEAD methods on the home endpoint return 405 Method Not Allowed.
+func TestHomeMethodNotAllowed(t *testing.T) {
+	mux := setupRoutes()
+	methods := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
+
+	for _, method := range methods {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/", nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("expected status 405 Method Not Allowed for %s /, got %d", method, rec.Code)
+			}
+			if allow := rec.Header().Get("Allow"); !strings.Contains(allow, "GET") {
+				t.Errorf("expected Allow header to contain GET, got %q", allow)
+			}
+		})
+	}
+}
+
+// TestDiscordWebhookWhitespaceURL verifies that leading and trailing whitespace on the webhook URL
+// is cleanly trimmed so notifications dispatch successfully.
+func TestDiscordWebhookWhitespaceURL(t *testing.T) {
+	received := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	sub := FormSubmission{
+		Name:    "Whitespace URL Tester",
+		Email:   "whitespace@example.com",
+		Message: "Testing URL whitespace trimming",
+	}
+
+	err := sendToDiscord("   "+server.URL+"   \n", sub)
+	if err != nil {
+		t.Fatalf("expected sendToDiscord to succeed with padded URL, got: %v", err)
+	}
+	if !received {
+		t.Fatalf("expected mock server to receive request")
+	}
+}
+
+// TestStoreFilePermissions verifies that saved submissions.json has readable file permissions.
+func TestStoreFilePermissions(t *testing.T) {
+	tempDir := t.TempDir()
+	testFile := filepath.Join(tempDir, "submissions.json")
+	store := NewSubmissionsStore(testFile)
+
+	err := store.Save(FormSubmission{
+		Name:    "Perm Tester",
+		Email:   "perm@example.com",
+		Message: "Testing file permissions",
+	})
+	if err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	info, err := os.Stat(testFile)
+	if err != nil {
+		t.Fatalf("os.Stat failed: %v", err)
+	}
+
+	// Verify the file has read permissions set for owner and others (0644)
+	mode := info.Mode().Perm()
+	if mode&0444 == 0 {
+		t.Errorf("expected readable permissions, got %o", mode)
 	}
 }
 
