@@ -89,7 +89,7 @@ func TestCORSPreflightSubmissions(t *testing.T) {
 // with a structured JSON error response and the Allow header.
 func TestSubmitMethodNotAllowed(t *testing.T) {
 	mux := setupRoutes()
-	methods := []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch}
+	methods := []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodPatch}
 
 	for _, method := range methods {
 		t.Run(method, func(t *testing.T) {
@@ -106,15 +106,17 @@ func TestSubmitMethodNotAllowed(t *testing.T) {
 				t.Errorf("expected Allow header to contain POST, got %q", allow)
 			}
 
-			var resp APIResponse
-			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-				t.Fatalf("expected valid JSON response, got error: %v", err)
-			}
-			if resp.Success {
-				t.Errorf("expected success: false, got true")
-			}
-			if resp.Message == "" {
-				t.Errorf("expected non-empty error message")
+			if method != http.MethodHead {
+				var resp APIResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("expected valid JSON response, got error: %v", err)
+				}
+				if resp.Success {
+					t.Errorf("expected success: false, got true")
+				}
+				if resp.Message == "" {
+					t.Errorf("expected non-empty error message")
+				}
 			}
 		})
 	}
@@ -847,6 +849,8 @@ func TestEmailValidationExtended(t *testing.T) {
 		"user@xn--mnchen-3ya.de",
 		"user@münchen.de", // RFC 6532 internationalized email address
 		"test_user@domain.org",
+		"user@sub-domain.example.com", // Hyphen within domain label
+		"user@example.xn--p1ai",       // IDN punycode TLD
 	}
 	for _, email := range validEmails {
 		if !isValidEmail(email) {
@@ -862,12 +866,22 @@ func TestEmailValidationExtended(t *testing.T) {
 		"user@domain.com.",
 		"user@domain..com",
 		"user name@domain.com",
+		"\"user@name\"@example.com",               // Quoted address with internal at-sign
 		"user@-example.com",
 		"user@example.-com",
 		"user@example.com-",
 		"user@-.com",
 		"user@example.c",
 		"user@example.123",
+		"user@exam_ple.com",                       // Underscore in domain label
+		"user@exam$ple.com",                       // Special character in domain label
+		"user@exam!ple.com",                       // Special character in domain label
+		"user@example.c1",                         // Digit in standard TLD
+		"user@example.c-m",                        // Hyphen in non-punycode TLD
+		".user@example.com",                       // Leading dot in unquoted local-part
+		"user.@example.com",                       // Trailing dot in unquoted local-part
+		"user..name@example.com",                  // Consecutive dots in unquoted local-part
+		"user@[127.0.0.1]",                        // Bracketed IP literal
 		strings.Repeat("a", 245) + "@example.com", // Total length > 254
 		strings.Repeat("a", 65) + "@example.com",  // Local part > 64
 	}
@@ -1006,4 +1020,80 @@ func TestStoreFilePermissions(t *testing.T) {
 		t.Errorf("expected readable permissions, got %o", mode)
 	}
 }
+
+// TestHeadMethodSupport verifies that HEAD requests to /submissions and / return HTTP 200
+// with proper headers and an empty body, matching standard HTTP behavior.
+func TestHeadMethodSupport(t *testing.T) {
+	cleanup := setupTestStore(t)
+	defer cleanup()
+
+	mux := setupRoutes()
+
+	// 1. HEAD /submissions returns 200 with Content-Type application/json and empty body
+	reqSubs := httptest.NewRequest(http.MethodHead, "/submissions", nil)
+	recSubs := httptest.NewRecorder()
+	mux.ServeHTTP(recSubs, reqSubs)
+
+	if recSubs.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK for HEAD /submissions, got %d", recSubs.Code)
+	}
+	if ct := recSubs.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("expected Content-Type application/json, got %q", ct)
+	}
+	if recSubs.Body.Len() != 0 {
+		t.Errorf("expected empty body for HEAD /submissions, got %d bytes: %s", recSubs.Body.Len(), recSubs.Body.String())
+	}
+
+	// 2. HEAD / returns 200 and empty body
+	reqHome := httptest.NewRequest(http.MethodHead, "/", nil)
+	recHome := httptest.NewRecorder()
+	mux.ServeHTTP(recHome, reqHome)
+
+	if recHome.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK for HEAD /, got %d", recHome.Code)
+	}
+	if recHome.Body.Len() != 0 {
+		t.Errorf("expected empty body for HEAD /, got %d bytes", recHome.Body.Len())
+	}
+}
+
+// TestStoreEmptyPathFallback verifies that creating or using a SubmissionsStore with an empty
+// path safely defaults to "submissions.json" without panic or error.
+func TestStoreEmptyPathFallback(t *testing.T) {
+	tempDir := t.TempDir()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get current working dir: %v", err)
+	}
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir to temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origWd)
+	}()
+
+	store := NewSubmissionsStore("")
+	if store.filePath != "submissions.json" {
+		t.Errorf("expected filePath to default to 'submissions.json', got %q", store.filePath)
+	}
+
+	// Verify Save and GetAll work with empty path
+	sub := FormSubmission{
+		Name:    "Fallback Tester",
+		Email:   "fallback@example.com",
+		Message: "Testing path fallback",
+	}
+	if err := store.Save(sub); err != nil {
+		t.Fatalf("Save failed with defaulted path: %v", err)
+	}
+
+	subs, err := store.GetAll()
+	if err != nil {
+		t.Fatalf("GetAll failed with defaulted path: %v", err)
+	}
+	if len(subs) != 1 || subs[0].Name != "Fallback Tester" {
+		t.Errorf("unexpected submission after fallback save: %+v", subs)
+	}
+}
+
 
