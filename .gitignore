@@ -1,4 +1,19 @@
-.star/
+# Environment and local configs
 .env
+.star/
+
+# Data and temporary files
 submissions.json
+submissions.json.corrupted-*
 *.tmp
+
+# Compiled binaries and test artifacts
+formstream
+formstream.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
