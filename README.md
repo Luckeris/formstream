@@ -1,12 +1,12 @@
 <div align="center">
   <img src="assets/logo.svg" alt="FormStream" width="220">
-  
+
 # FormStream ⚡
-  
+
 > **Lightweight, zero-dependency Go microservice for handling contact form submissions and streaming instant notifications to Discord via Webhooks.**
 > **A tool for web developers**
-[![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.20%2B-00ADD8.svg)](https://go.dev/)
+> [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
+> [![Go Version](https://img.shields.io/badge/Go-1.20%2B-00ADD8.svg)](https://go.dev/)
 
 </div>
 ---
@@ -107,6 +107,8 @@ async function sendForm(name, email, message) {
 ```
 
 ---
+
+Of course If you have anyting, feel free to colaborate and open a pull or merge request.
 
 ## License
 
